@@ -1,4 +1,4 @@
-// 1. 強制 IPv4 優先 (防止 Render 網路黑洞/Ghost Hang)
+// 1. 強制 IPv4 優先 (防止 Render 網路黑洞)
 const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
 
@@ -7,11 +7,12 @@ const {
     Client, 
     GatewayIntentBits, 
     ActionRowBuilder, 
-    StringSelectMenuBuilder,
-    ModalBuilder,
-    TextInputBuilder,
-    TextInputStyle,
-    InteractionType
+    StringSelectMenuBuilder, 
+    ModalBuilder, 
+    TextInputBuilder, 
+    TextInputStyle, 
+    InteractionType, 
+    PermissionsBitField 
 } = require('discord.js');
 const express = require('express');
 const admin = require('firebase-admin');
@@ -66,107 +67,92 @@ app.listen(PORT, () => {
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMembers
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
     ]
 });
 
-client.once('clientReady', () => {
-    console.log(`✅ [DISCORD] Boss 團審核機器人已登入: ${client.user.tag}`);
+// 認證打手身分組 ID (直接內建，Render 免設)
+const VERIFIED_ROLE_ID = '1564554884949475380';
+
+// 職業清單定義
+const JOB_LIST = [
+    { label: '英雄', emoji: '⚔️', color: '#E74C3C' },
+    { label: '黑騎士', emoji: '🛡️', color: '#2C3E50' },
+    { label: '聖騎士', emoji: '🔨', color: '#F1C40F' },
+    { label: '主教', emoji: '✨', color: '#F39C12' },
+    { label: '夜使者', emoji: '🌟', color: '#9B59B6' },
+    { label: '暗影神偷', emoji: '🗡️', color: '#34495E' },
+    { label: '箭神', emoji: '🏹', color: '#2ECC71' },
+    { label: '神射手', emoji: '🎯', color: '#16A085' },
+    { label: '拳霸', emoji: '🥊', color: '#E67E22' },
+    { label: '槍神', emoji: '🔫', color: '#1ABC9C' }
+];
+
+// 7. 啟動時自動檢查並建立伺服器缺少的職業身分組
+async function ensureRoles(guild) {
+    console.log(`🔄 正在檢查伺服器【${guild.name}】身分組完整性...`);
+    for (const job of JOB_LIST) {
+        let role = guild.roles.cache.find(r => r.name === job.label);
+        if (!role) {
+            try {
+                role = await guild.roles.create({
+                    name: job.label,
+                    color: job.color,
+                    reason: 'Boss 機器人自動建立職業身分組'
+                });
+                console.log(`➕ [ROLE_CREATED] 已自動建立身分組: ${job.label}`);
+            } catch (err) {
+                console.error(`❌ 無法自動建立身分組 ${job.label}:`, err.message);
+            }
+        }
+    }
+}
+
+client.once('clientReady', async () => {
+    console.log(`✅ [DISCORD] Boss 團審核機器人已成功登入為: ${client.user.tag}`);
+    for (const guild of client.guilds.cache.values()) {
+        await ensureRoles(guild);
+    }
 });
 
-// 7. 產生支援「複選」的職業選單 (可選 1 ~ 5 個職業)
+// 8. 建立支援複選的職業選單
 function createMultiRoleMenu() {
     const selectMenu = new StringSelectMenuBuilder()
         .setCustomId('select_boss_jobs')
         .setPlaceholder('點擊選擇你的打王職業（可複選）...')
-        .setMinValues(1) // 至少選 1 個
-        .setMaxValues(5) // 最多可複選 5 個職業
-        .addOptions([
-            {
-                label: '英雄',
-                description: '包含英雄職業角色',
-                value: '英雄',
-                emoji: '⚔️'
-            },
-            {
-                label: '黑騎士',
-                description: '包含黑騎士職業角色',
-                value: '黑騎',
-                emoji: '🛡️'
-            },
-            {
-                label: '聖騎士',
-                description: '包含聖騎士職業角色',
-                value: '聖騎',
-                emoji: '🔨'
-            },
-            {
-                label: '主教',
-                description: '包含主教職業角色',
-                value: '主教',
-                emoji: '✨'
-            },
-            {
-                label: '夜使者',
-                description: '包含夜使者/標賊角色',
-                value: '夜使',
-                emoji: '🌟'
-            },
-            {
-                label: '暗影神偷',
-                description: '包含刀賊職業角色',
-                value: '刀賊',
-                emoji: '🗡️'
-            },
-            {
-                label: '箭神',
-                description: '包含箭神職業角色',
-                value: '箭神',
-                emoji: '🏹'
-            },
-            {
-                label: '神射手',
-                description: '包含神射手職業角色',
-                value: '神射',
-                emoji: '🎯'
-            },
-            {
-                label: '拳霸',
-                description: '包含拳霸職業角色',
-                value: '拳霸',
-                emoji: '🥊'
-            },
-            {
-                label: '槍神',
-                description: '包含槍神職業角色',
-                value: '槍神',
-                emoji: '🔫'
-            }
-        ]);
+        .setMinValues(1)
+        .setMaxValues(JOB_LIST.length)
+        .addOptions(
+            JOB_LIST.map(job => ({
+                label: job.label,
+                description: `選擇 ${job.label} 職業`,
+                value: job.label,
+                emoji: job.emoji
+            }))
+        );
 
     return new ActionRowBuilder().addComponents(selectMenu);
 }
 
-// 8. 職業名稱與身分組 ID 的對照映射表
-function getRoleIdByJob(jobName) {
-    const roleMapping = {
-        '英雄': process.env.ROLE_HERO,
-        '黑騎': process.env.ROLE_DK,
-        '聖騎': process.env.ROLE_PALADIN,
-        '主教': process.env.ROLE_BISHOP,
-        '夜使': process.env.ROLE_NL,
-        '刀賊': process.env.ROLE_SHADOWER,
-        '箭神': process.env.ROLE_BOWMASTER,
-        '神射': process.env.ROLE_MARKSMAN,
-        '拳霸': process.env.ROLE_BUCCANEER,
-        '槍神': process.env.ROLE_CORSAIR
-    };
-    return roleMapping[jobName];
-}
+// 9. 允許管理員在驗證頻道打 !setup 發送常駐驗證面板
+client.on('messageCreate', async (message) => {
+    if (message.author.bot) return;
+    if (message.content === '!setup' && message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        const row = createMultiRoleMenu();
+        await message.channel.send({
+            content: `⚔️ **Boss 團成員身分驗證**\n請點擊下方選單**勾選你的所有主力打王職業（可複選）**，接著輸入遊戲 ID 完成認證以解鎖頻道：`,
+            components: [row]
+        });
+        await message.delete().catch(() => {});
+        console.log(`📌 [SETUP] 管理員已在 #${message.channel.name} 建立常駐驗證面板`);
+    }
+});
 
-// 9. 新成員加入時，在驗證頻道發送驗證卡片
+// 10. 新成員加入時，自動抓取系統頻道或第一個可發言頻道發送選單
 client.on('guildMemberAdd', async (member) => {
-    console.log(`🔍 [EVENT] 偵測到新打手加入: ${member.user.tag}`);
+    console.log(`🔍 [EVENT] 新打手加入: ${member.user.tag}`);
 
     const channel = member.guild.systemChannel || member.guild.channels.cache.find(c => 
         c.isTextBased() && c.permissionsFor(member.guild.members.me).has('SendMessages')
@@ -176,29 +162,26 @@ client.on('guildMemberAdd', async (member) => {
         try {
             const row = createMultiRoleMenu();
             await channel.send({
-                content: `⚔️ 歡迎打手 <@${member.id}> 加入 Boss 攻略組！\n請先於下方**勾選你的所有主力打王職業（可複選）**，接著輸入遊戲 ID 完成認證以解鎖頻道：`,
+                content: `👋 歡迎打手 <@${member.id}> 加入！\n請於下方選單**勾選你的打王職業（可複選）**並輸入遊戲 ID 以解鎖打王頻道：`,
                 components: [row]
             });
-            console.log(`✅ [SUCCESS] 已發送認證選單給: ${member.user.tag}`);
+            console.log(`✅ 已在 #${channel.name} 發送驗證選單`);
         } catch (error) {
-            console.error(`❌ [ERROR] 無法發送訊息:`, error);
+            console.error(`❌ 無法發送訊息:`, error);
         }
     }
 });
 
-// 10. 處理選單選擇與 Modal 提交
-// 暫存使用者選好的職業（Key: userId, Value: jobsArray）
+// 11. 處理選單選擇與 Modal 輸入
 const tempSelectedJobs = new Map();
 
 client.on('interactionCreate', async (interaction) => {
-    // 步驟 A：玩家勾選完 1~多個職業後，暫存選擇並彈出遊戲 ID 輸入框
     if (interaction.isStringSelectMenu() && interaction.customId === 'select_boss_jobs') {
-        const selectedJobs = interaction.values; // 為一個陣列，例如 ['拳霸', '刀賊']
-        tempSelectedJobs.set(interaction.user.id, selectedJobs);
+        tempSelectedJobs.set(interaction.user.id, interaction.values);
 
         const modal = new ModalBuilder()
             .setCustomId('modal_boss_register')
-            .setTitle('填寫打手認證資訊');
+            .setTitle('填寫遊戲角色名稱');
 
         const ingameIdInput = new TextInputBuilder()
             .setCustomId('boss_ingame_id')
@@ -208,13 +191,10 @@ client.on('interactionCreate', async (interaction) => {
             .setRequired(true)
             .setMaxLength(16);
 
-        const row = new ActionRowBuilder().addComponents(ingameIdInput);
-        modal.addComponents(row);
-
+        modal.addComponents(new ActionRowBuilder().addComponents(ingameIdInput));
         await interaction.showModal(modal);
     }
 
-    // 步驟 B：玩家填寫 ID 提交表單
     if (interaction.type === InteractionType.ModalSubmit && interaction.customId === 'modal_boss_register') {
         const ingameId = interaction.fields.getTextInputValue('boss_ingame_id');
         const member = interaction.member;
@@ -224,36 +204,33 @@ client.on('interactionCreate', async (interaction) => {
             return interaction.reply({ content: '❌ 選擇逾時或未選取職業，請重新在選單中選取！', ephemeral: true });
         }
 
-        // 組合暱稱：例如 [克里斯] 拳霸/刀賊
+        // 暱稱格式：[遊戲ID] 職業A/職業B
         const jobsDisplay = selectedJobs.join('/');
         let newNickname = `[${ingameId}] ${jobsDisplay}`;
-
-        // Discord 暱稱最長限制 32 字元，避免超出
-        if (newNickname.length > 32) {
-            newNickname = newNickname.substring(0, 32);
-        }
+        if (newNickname.length > 32) newNickname = newNickname.substring(0, 32);
 
         try {
-            // 1. 自動修改伺服器暱稱
+            // A. 修改伺服器暱稱
             await member.setNickname(newNickname);
-            console.log(`✅ [NICKNAME] 已更新暱稱為: ${newNickname}`);
+            console.log(`✅ [NICKNAME] 已更新暱稱: ${newNickname}`);
 
-            // 2. 批次賦予所有勾選的職業身分組
-            for (const job of selectedJobs) {
-                const roleId = getRoleIdByJob(job);
-                if (roleId && interaction.guild.roles.cache.has(roleId)) {
-                    await member.roles.add(roleId);
-                    console.log(`✅ [ROLE] 已賦予職業身分組: ${job}`);
+            // B. 批次賦予所有勾選的職業身分組 (依名稱配對)
+            for (const jobName of selectedJobs) {
+                const role = interaction.guild.roles.cache.find(r => r.name === jobName);
+                if (role) {
+                    await member.roles.add(role);
+                    console.log(`✅ [ROLE] 已賦予職業身分組: ${jobName}`);
                 }
             }
 
-            // 3. 賦予解鎖頻道的「已認證打手」通用身分組
-            if (process.env.ROLE_VERIFIED && interaction.guild.roles.cache.has(process.env.ROLE_VERIFIED)) {
-                await member.roles.add(process.env.ROLE_VERIFIED);
-                console.log(`✅ [ROLE] 已賦予解鎖身分組: ROLE_VERIFIED`);
+            // C. 賦予認證打手身分組 (使用內建 ID)
+            const verifiedRole = interaction.guild.roles.cache.get(VERIFIED_ROLE_ID);
+            if (verifiedRole) {
+                await member.roles.add(verifiedRole);
+                console.log(`✅ [ROLE] 已賦予認證打手身分組`);
             }
 
-            // 4. 寫入 Firebase 資料庫存檔
+            // D. 存入 Firebase
             await db.collection('boss_members').doc(member.id).set({
                 discordTag: member.user.tag,
                 ingameId: ingameId,
@@ -261,25 +238,23 @@ client.on('interactionCreate', async (interaction) => {
                 verifiedAt: new Date().toISOString()
             }, { merge: true });
 
-            // 清理快取
             tempSelectedJobs.delete(member.id);
 
             await interaction.reply({
-                content: `🎉 認證完成！你的暱稱已設定為 **${newNickname}**，並已為你解鎖所有打王頻道！`,
+                content: `🎉 認證完成！你的暱稱已設定為 **${newNickname}**，並已為你發放對應職業身分組與認證打手權限！`,
                 ephemeral: true
             });
-
         } catch (error) {
-            console.error('❌ [VERIFY_ERROR] 認證過程發生錯誤:', error);
+            console.error('❌ [VERIFY_ERROR] 設定失敗:', error);
             await interaction.reply({
-                content: `❌ 認證失敗！請確認機器人身分組階層是否高於所有玩家身分組，並擁有管理暱稱與身分組權限。`,
+                content: `❌ 設定失敗！請確認機器人身分組階層是否排在最上方，並擁有「管理暱稱」與「管理身分組」權限。`,
                 ephemeral: true
             });
         }
     }
 });
 
-// 11. 登入
+// 12. 登入
 if (!process.env.DISCORD_TOKEN) {
     console.error('❌ [CRITICAL] 缺少 DISCORD_TOKEN 環境變數！');
     process.exit(1);
