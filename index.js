@@ -12,7 +12,8 @@ const {
     TextInputBuilder, 
     TextInputStyle, 
     InteractionType, 
-    PermissionsBitField 
+    PermissionsBitField,
+    Events
 } = require('discord.js');
 const express = require('express');
 const admin = require('firebase-admin');
@@ -50,7 +51,7 @@ try {
 
 const db = admin.firestore();
 
-// 5. 建立 Express 保活伺服器 (供 UptimeRobot Ping)
+// 5. 建立 Express 保活伺服器
 const app = express();
 const PORT = process.env.PORT || 10000;
 
@@ -73,10 +74,10 @@ const client = new Client({
     ]
 });
 
-// 認證打手身分組 ID (直接內建，Render 免設)
+// 認證打手身分組 ID
 const VERIFIED_ROLE_ID = '1564554884949475380';
 
-// 職業清單定義
+// 職業清單
 const JOB_LIST = [
     { label: '英雄', emoji: '⚔️', color: '#E74C3C' },
     { label: '黑騎士', emoji: '🛡️', color: '#2C3E50' },
@@ -90,14 +91,13 @@ const JOB_LIST = [
     { label: '槍神', emoji: '🔫', color: '#1ABC9C' }
 ];
 
-// 7. 啟動時自動檢查並建立伺服器缺少的職業身分組
 async function ensureRoles(guild) {
-    console.log(`🔄 正在檢查伺服器【${guild.name}】身分組完整性...`);
+    console.log(`🔄 正在檢查伺服器【${guild.name}】身分組...`);
     for (const job of JOB_LIST) {
         let role = guild.roles.cache.find(r => r.name === job.label);
         if (!role) {
             try {
-                role = await guild.roles.create({
+                await guild.roles.create({
                     name: job.label,
                     color: job.color,
                     reason: 'Boss 機器人自動建立職業身分組'
@@ -110,14 +110,14 @@ async function ensureRoles(guild) {
     }
 }
 
-client.once('clientReady', async () => {
-    console.log(`✅ [DISCORD] Boss 團審核機器人已成功登入為: ${client.user.tag}`);
-    for (const guild of client.guilds.cache.values()) {
+// 7. 監聽上線事件 (使用 Discord.js v14 標準 Events.ClientReady)
+client.once(Events.ClientReady, async (c) => {
+    console.log(`🎉 [SUCCESS] Discord 機器人登入成功！登入名稱: ${c.user.tag}`);
+    for (const guild of c.guilds.cache.values()) {
         await ensureRoles(guild);
     }
 });
 
-// 8. 建立支援複選的職業選單
 function createMultiRoleMenu() {
     const selectMenu = new StringSelectMenuBuilder()
         .setCustomId('select_boss_jobs')
@@ -136,13 +136,16 @@ function createMultiRoleMenu() {
     return new ActionRowBuilder().addComponents(selectMenu);
 }
 
-// 9. 允許管理員在驗證頻道打 !setup 發送常駐驗證面板
-client.on('messageCreate', async (message) => {
+// 管理員 !setup 指令
+client.on(Events.MessageCreate, async (message) => {
     if (message.author.bot) return;
-    if (message.content === '!setup' && message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+    if (message.content === '!setup') {
+        if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+            return message.reply('❌ 只有伺服器管理員可使用此指令！');
+        }
         const row = createMultiRoleMenu();
         await message.channel.send({
-            content: `⚔️ **Boss 團成員身分驗證**\n請點擊下方選單**勾選你的所有主力打王職業（可複選）**，接著輸入遊戲 ID 完成認證以解鎖頻道：`,
+            content: `⚔️ **Boss 團成員身分驗證**\n請點擊下方選單**勾選你的打王職業（可複選）**，接著輸入遊戲 ID 完成認證以解鎖打王頻道：`,
             components: [row]
         });
         await message.delete().catch(() => {});
@@ -150,10 +153,9 @@ client.on('messageCreate', async (message) => {
     }
 });
 
-// 10. 新成員加入時，自動抓取系統頻道或第一個可發言頻道發送選單
-client.on('guildMemberAdd', async (member) => {
+// 新打手加入
+client.on(Events.GuildMemberAdd, async (member) => {
     console.log(`🔍 [EVENT] 新打手加入: ${member.user.tag}`);
-
     const channel = member.guild.systemChannel || member.guild.channels.cache.find(c => 
         c.isTextBased() && c.permissionsFor(member.guild.members.me).has('SendMessages')
     );
@@ -165,17 +167,16 @@ client.on('guildMemberAdd', async (member) => {
                 content: `👋 歡迎打手 <@${member.id}> 加入！\n請於下方選單**勾選你的打王職業（可複選）**並輸入遊戲 ID 以解鎖打王頻道：`,
                 components: [row]
             });
-            console.log(`✅ 已在 #${channel.name} 發送驗證選單`);
         } catch (error) {
             console.error(`❌ 無法發送訊息:`, error);
         }
     }
 });
 
-// 11. 處理選單選擇與 Modal 輸入
+// 互動選單與 Modal
 const tempSelectedJobs = new Map();
 
-client.on('interactionCreate', async (interaction) => {
+client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isStringSelectMenu() && interaction.customId === 'select_boss_jobs') {
         tempSelectedJobs.set(interaction.user.id, interaction.values);
 
@@ -204,33 +205,22 @@ client.on('interactionCreate', async (interaction) => {
             return interaction.reply({ content: '❌ 選擇逾時或未選取職業，請重新在選單中選取！', ephemeral: true });
         }
 
-        // 暱稱格式：[遊戲ID] 職業A/職業B
         const jobsDisplay = selectedJobs.join('/');
         let newNickname = `[${ingameId}] ${jobsDisplay}`;
         if (newNickname.length > 32) newNickname = newNickname.substring(0, 32);
 
         try {
-            // A. 修改伺服器暱稱
             await member.setNickname(newNickname);
             console.log(`✅ [NICKNAME] 已更新暱稱: ${newNickname}`);
 
-            // B. 批次賦予所有勾選的職業身分組 (依名稱配對)
             for (const jobName of selectedJobs) {
                 const role = interaction.guild.roles.cache.find(r => r.name === jobName);
-                if (role) {
-                    await member.roles.add(role);
-                    console.log(`✅ [ROLE] 已賦予職業身分組: ${jobName}`);
-                }
+                if (role) await member.roles.add(role);
             }
 
-            // C. 賦予認證打手身分組 (使用內建 ID)
             const verifiedRole = interaction.guild.roles.cache.get(VERIFIED_ROLE_ID);
-            if (verifiedRole) {
-                await member.roles.add(verifiedRole);
-                console.log(`✅ [ROLE] 已賦予認證打手身分組`);
-            }
+            if (verifiedRole) await member.roles.add(verifiedRole);
 
-            // D. 存入 Firebase
             await db.collection('boss_members').doc(member.id).set({
                 discordTag: member.user.tag,
                 ingameId: ingameId,
@@ -254,10 +244,20 @@ client.on('interactionCreate', async (interaction) => {
     }
 });
 
-// 12. 登入
-if (!process.env.DISCORD_TOKEN) {
-    console.error('❌ [CRITICAL] 缺少 DISCORD_TOKEN 環境變數！');
+// 8. 嘗試登入 (加入 Token 清洗與詳細錯誤捕捉)
+const rawToken = process.env.DISCORD_TOKEN ? process.env.DISCORD_TOKEN.trim() : null;
+
+if (!rawToken) {
+    console.error('❌ [CRITICAL] 找不到 DISCORD_TOKEN 環境變數！');
     process.exit(1);
 }
 
-client.login(process.env.DISCORD_TOKEN);
+console.log(`🔑 [DISCORD] 正在使用 Token 連線 Discord (Token 長度: ${rawToken.length})...`);
+
+client.login(rawToken)
+    .then(() => {
+        console.log('📡 [DISCORD] client.login() 憑證通過，正在建立 Gateway 連線...');
+    })
+    .catch((err) => {
+        console.error('❌ [LOGIN_FAILED] 機器人登入被拒絕，具體原因:', err);
+    });
